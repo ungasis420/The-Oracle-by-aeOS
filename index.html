@@ -2,15 +2,379 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Neo by aeOS</title>
-  </head>
-  <body>
-    <h1>Neo by aeOS – GitHub Pages test</h1>
-    <p>If you can see this in the browser, your GitHub hosting works 🎉</p>
+    <title>Neo by aeOS – OneDrive Decision Tree</title>
 
-    <!-- Later we will:
-         - Add Microsoft login (MSAL)
-         - Call Graph API
-         - Load/save your decision tree JSON from OneDrive -->
+    <!-- MSAL.js v2 for Azure AD / Microsoft identity -->
+    <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 20px;
+        background: #050816;
+        color: #e5e7eb;
+      }
+
+      h1 {
+        margin-top: 0;
+      }
+
+      .card {
+        background: rgba(15, 23, 42, 0.95);
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin-bottom: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+      }
+
+      button {
+        background: #6366f1;
+        border: none;
+        color: white;
+        padding: 8px 14px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+
+      button.secondary {
+        background: #0f172a;
+        border: 1px solid #4b5563;
+      }
+
+      #status {
+        font-size: 13px;
+        color: #a5b4fc;
+        margin-top: 6px;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 240px;
+        border-radius: 8px;
+        border: 1px solid #4b5563;
+        background: #020617;
+        color: #e5e7eb;
+        padding: 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 13px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .pill {
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        background: rgba(37, 99, 235, 0.15);
+        border: 1px solid rgba(59, 130, 246, 0.5);
+        color: #bfdbfe;
+      }
+
+      a {
+        color: #60a5fa;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Neo by aeOS – OneDrive Decision Tree</h1>
+
+    <div class="card">
+      <div class="row">
+        <button id="loginBtn">Connect to OneDrive</button>
+        <button id="logoutBtn" class="secondary" disabled>Sign out</button>
+        <span id="userSpan"></span>
+      </div>
+      <div id="status">Not signed in.</div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content: space-between;">
+        <div>
+          <strong>Decision tree JSON file (in your OneDrive):</strong>
+          <div id="filePath" style="font-size: 12px; color: #9ca3af;"></div>
+        </div>
+        <button id="loadBtn" class="secondary" disabled>Reload from OneDrive</button>
+      </div>
+
+      <p style="font-size: 13px; color: #9ca3af; margin-top: 8px;">
+        Edit the JSON below and click <strong>Save to OneDrive</strong>. Neo by aeOS will
+        treat this as the source of truth for your decision tree.
+      </p>
+
+      <textarea id="jsonArea" placeholder="{ }"></textarea>
+
+      <div class="row" style="margin-top: 10px; justify-content: space-between;">
+        <div class="row">
+          <button id="saveBtn" disabled>Save to OneDrive</button>
+          <span id="saveStatus" style="font-size: 12px; color: #a5b4fc;"></span>
+        </div>
+        <span class="pill">Scope: Files.ReadWrite (delegated)</span>
+      </div>
+    </div>
+
+    <script>
+      /********************************************************************
+       * 1. MSAL CONFIGURATION
+       ********************************************************************/
+
+      // TODO: REPLACE THESE TWO VALUES WITH YOUR REAL IDs FROM AZURE
+      const msalConfig = {
+        auth: {
+          clientId: "bab0337f-b403-467e-9f87-00de240bf761", // Application (client) ID
+          authority: "https://login.microsoftonline.com/17169edd-28e9-44b5-855f-1d84654bbdc5", // Directory (tenant) ID
+          redirectUri: "https://ungsasi420.github.io/The-Oracle-by-aeOS/", // GitHub Pages URL
+        },
+        cache: {
+          cacheLocation: "sessionStorage",
+          storeAuthStateInCookie: false,
+        },
+      };
+
+      // Request the Files.ReadWrite scope so we can read/write in OneDrive
+      const loginRequest = {
+        scopes: ["Files.ReadWrite"],
+      };
+
+      const neoFilePath = "/neo-decision-tree.json"; // path in your OneDrive root
+
+      const GRAPH_ENDPOINT_CONTENT =
+        "https://graph.microsoft.com/v1.0/me/drive/root:" +
+        neoFilePath +
+        ":/content";
+
+      const msalInstance = new msal.PublicClientApplication(msalConfig);
+
+      let account = null;
+
+      /********************************************************************
+       * 2. UI HELPERS
+       ********************************************************************/
+
+      const loginBtn = document.getElementById("loginBtn");
+      const logoutBtn = document.getElementById("logoutBtn");
+      const statusDiv = document.getElementById("status");
+      const userSpan = document.getElementById("userSpan");
+      const jsonArea = document.getElementById("jsonArea");
+      const saveBtn = document.getElementById("saveBtn");
+      const loadBtn = document.getElementById("loadBtn");
+      const saveStatus = document.getElementById("saveStatus");
+      const filePathSpan = document.getElementById("filePath");
+
+      filePathSpan.textContent = neoFilePath;
+
+      function setSignedOutUI() {
+        loginBtn.disabled = false;
+        logoutBtn.disabled = true;
+        saveBtn.disabled = true;
+        loadBtn.disabled = true;
+        userSpan.textContent = "";
+        statusDiv.textContent = "Not signed in.";
+      }
+
+      function setSignedInUI() {
+        loginBtn.disabled = true;
+        logoutBtn.disabled = false;
+        saveBtn.disabled = false;
+        loadBtn.disabled = false;
+        statusDiv.textContent = "Signed in. You can now load/save the decision tree JSON.";
+      }
+
+      function showError(err) {
+        console.error(err);
+        statusDiv.textContent = "Error: " + (err.message || err.toString());
+      }
+
+      /********************************************************************
+       * 3. AUTHENTICATION HELPERS
+       ********************************************************************/
+
+      async function getToken() {
+        if (!account) {
+          throw new Error("No active account");
+        }
+
+        const silentRequest = {
+          ...loginRequest,
+          account: account,
+        };
+
+        try {
+          // Try to get token silently first
+          const silentResult = await msalInstance.acquireTokenSilent(silentRequest);
+          return silentResult.accessToken;
+        } catch (e) {
+          console.log("Silent token acquisition failed, using popup", e);
+          const popupResult = await msalInstance.acquireTokenPopup(loginRequest);
+          return popupResult.accessToken;
+        }
+      }
+
+      function selectAccount() {
+        const currentAccounts = msalInstance.getAllAccounts();
+
+        if (currentAccounts.length === 0) {
+          account = null;
+          setSignedOutUI();
+          return;
+        }
+
+        // For simplicity, just take the first account
+        account = currentAccounts[0];
+        userSpan.textContent = "Logged in as " + account.username;
+        setSignedInUI();
+      }
+
+      /********************************************************************
+       * 4. GRAPH CALLS – LOAD & SAVE JSON
+       ********************************************************************/
+
+      async function loadJsonFromOneDrive() {
+        saveStatus.textContent = "";
+        statusDiv.textContent = "Loading JSON from OneDrive...";
+
+        try {
+          const token = await getToken();
+
+          const response = await fetch(GRAPH_ENDPOINT_CONTENT, {
+            method: "GET",
+            headers: {
+              Authorization: "Bearer " + token,
+            },
+          });
+
+          if (response.status === 404) {
+            // File does not exist yet – create a starter JSON
+            const starter = {
+              meta: {
+                created: new Date().toISOString(),
+                note: "Starter decision tree for Neo by aeOS",
+              },
+              nodes: [],
+            };
+
+            jsonArea.value = JSON.stringify(starter, null, 2);
+            statusDiv.textContent =
+              "File did not exist. A starter JSON has been loaded into the editor. Click 'Save to OneDrive' to create it.";
+            return;
+          }
+
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error("Graph error " + response.status + ": " + text);
+          }
+
+          const textContent = await response.text();
+          jsonArea.value = textContent;
+          statusDiv.textContent = "JSON loaded from OneDrive.";
+        } catch (err) {
+          showError(err);
+        }
+      }
+
+      async function saveJsonToOneDrive() {
+        saveStatus.textContent = "";
+        statusDiv.textContent = "Saving JSON to OneDrive...";
+
+        let content = jsonArea.value;
+
+        // Optional: basic validation
+        try {
+          JSON.parse(content);
+        } catch (e) {
+          saveStatus.textContent =
+            "❌ JSON is invalid. Please fix the syntax before saving.";
+          statusDiv.textContent = "Invalid JSON.";
+          return;
+        }
+
+        try {
+          const token = await getToken();
+
+          const response = await fetch(GRAPH_ENDPOINT_CONTENT, {
+            method: "PUT",
+            headers: {
+              Authorization: "Bearer " + token,
+              "Content-Type": "application/json",
+            },
+            body: content,
+          });
+
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error("Graph error " + response.status + ": " + text);
+          }
+
+          saveStatus.textContent = "✅ Saved at " + new Date().toLocaleTimeString();
+          statusDiv.textContent = "JSON saved to OneDrive successfully.";
+        } catch (err) {
+          showError(err);
+        }
+      }
+
+      /********************************************************************
+       * 5. WIRE UP BUTTONS & HANDLE REDIRECTS
+       ********************************************************************/
+
+      loginBtn.onclick = async () => {
+        statusDiv.textContent = "Opening login popup...";
+        try {
+          const loginResult = await msalInstance.loginPopup(loginRequest);
+          account = loginResult.account;
+          userSpan.textContent = "Logged in as " + account.username;
+          setSignedInUI();
+        } catch (err) {
+          showError(err);
+        }
+      };
+
+      logoutBtn.onclick = async () => {
+        if (!account) {
+          return;
+        }
+        const logoutRequest = {
+          account: account,
+          postLogoutRedirectUri: msalConfig.auth.redirectUri,
+        };
+        await msalInstance.logoutPopup(logoutRequest);
+        account = null;
+        jsonArea.value = "";
+        saveStatus.textContent = "";
+        setSignedOutUI();
+      };
+
+      loadBtn.onclick = () => {
+        loadJsonFromOneDrive();
+      };
+
+      saveBtn.onclick = () => {
+        saveJsonToOneDrive();
+      };
+
+      // Handle the redirect after login if using redirect flow (not strictly needed for popup, but safe)
+      msalInstance
+        .handleRedirectPromise()
+        .then((response) => {
+          if (response && response.account) {
+            account = response.account;
+          }
+          selectAccount();
+        })
+        .catch((err) => {
+          console.error(err);
+        });
+    </script>
   </body>
 </html>
